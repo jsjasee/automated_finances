@@ -3,6 +3,7 @@ import requests
 
 NOTION_TOKEN = os.getenv("NOTION_API_TOKEN")  # Notion integration token (starts with ntn_ or secret_)
 DS_ID  = os.getenv("NOTION_DB_ID")     # IMPORTANT: this must be your DATA SOURCE ID
+ACCOUNT_PAGE_ID = os.getenv("ACCOUNT_PAGE_ID")
 FILTER_QUERY = {"property": "Date", "date": {"is_not_empty": True}} # we want to ignore any rows without dates.
 SORT_QUERY = [{"property": "Date", "direction": "descending"}]  # latest first aka descending
 PAGE_SIZE = 50
@@ -177,6 +178,9 @@ class NotionManager:
                 # "Expense Type": {"relation": [
                 #     {"id": PAGE_IDS["Shopping"]},
                 # ]}
+                "Accounts" : {
+                    "relation" : [{"id": ACCOUNT_PAGE_ID}]
+                },
             }
         }
 
