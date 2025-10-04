@@ -43,6 +43,8 @@ if msgs:
                                       text=f"⬆️ New INCOME:\n🗓️DATE: {income_details['date_time']}\n💰AMOUNT: {income_details['amount_raw']}\nPAYEE: {income_details['from']}")
         elif card_transaction_details["date_time"]:
             converted_date = gmail_manager.convert_date(card_transaction_details['date_time'])
-            notion_bot.add_row(record_name=card_transaction_details['to'], record_date=converted_date,
-                               record_amount=card_transaction_details['amount'])
+
+            if converted_date not in notion_bot.latest_dates_in_record or card_transaction_details['amount'] not in latest_amounts_in_record or card_transaction_details['to'] not in notion_bot.latest_names_in_record:
+                notion_bot.add_row(record_name=card_transaction_details['to'], record_date=converted_date, record_amount=card_transaction_details['amount'])
+
             telegram_bot.send_message(chat_id=CHAT_ID, text=f"💳️ New expense:\n🗓️DATE: {card_transaction_details['date_time']}\n💵AMOUNT: {card_transaction_details['amount_raw']}\n🧍RECIPIENT: {card_transaction_details['to']}")
