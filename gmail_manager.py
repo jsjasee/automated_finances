@@ -2,14 +2,42 @@ import os
 import re
 
 from lxml import html  # lxml's HTML parser + XPath support
-from simplegmail import Gmail
+from html import escape as html_escape
+
+# ─────────────────────────────────────────────────────────────────────────────
+# [ADDED] We still try to use simplegmail if available (keeps your current flow),
+# but we also import google-auth libs for a proxy-friendly fallback that avoids
+# oauth2client/httplib2 issues on PythonAnywhere free.
+# HOW: we attempt simplegmail first; on refresh errors or network issues,
+#      we transparently fall back to the Gmail REST API via google-auth+requests.
+# WHY: your error shows invalid_grant during refresh AND PA proxy issues.
+# ─────────────────────────────────────────────────────────────────────────────
+try:
+    from simplegmail import Gmail
+    _SIMPLEGMAIL_AVAILABLE = True
+except Exception:
+    _SIMPLEGMAIL_AVAILABLE = False
+
+# [ADDED] google-auth stack (proxy-friendly) + utils to decode Gmail payloads
+from google.oauth2.credentials import Credentials  # HOW: reads gmail_token.json from google-auth flow
+from googleapiclient.discovery import build        # HOW: constructs Gmail API client
+from google.auth.transport.requests import Request # HOW: refreshes tokens via requests (respects proxies)
+import base64                                      # HOW: decode base64url-encoded message bodies
+
 from dotenv import load_dotenv
 from datetime import datetime
 
 load_dotenv()
 
-CREDS_FILE_PATH = os.environ.get("GMAIL_CREDS_FILE_PATH")
-START_PERIOD = "2d" # the period used for the search criteria
+CREDS_FILE_PATH = os.environ.get("GMAIL_CREDS_FILE_PATH")  # original simplegmail creds path (leave as-is)
+# ─────────────────────────────────────────────────────────────────────────────
+# [ADDED] Path to a google-auth style gmail_token.json (minted via InstalledAppFlow).
+# WHY: simplegmail's token format != google-auth's. We use this for the fallback.
+# HOW: run the local reauth script once to produce gmail_token.json, then upload to server.
+# ─────────────────────────────────────────────────────────────────────────────
+GOOGLE_TOKEN_JSON = os.environ.get("GMAIL_CREDS_FILE_PATH", "secrets/gmail_token.json")
+
+START_PERIOD = "2d"  # the period used for the search criteria, change to 2d
 END_PERIOD = "0d"
 
 
@@ -130,7 +158,7 @@ def extract_amount_received(html_str: str):
            "from": get_text_after_strong_element(doc, "From:"),
            "to": get_text_after_strong_element(doc, "To:")}
 
-    # 1) From / To via <strong> tails (in the dictionary)
+    # 1) From / To via <strong> tails (in the dictionary aka the 'get_text_after_strong_element(doc, "From:")')
 
     # 2) Amount + DateTime from the “You have received … on …” sentence
     # Grab a compact text dump of the main content block
@@ -169,8 +197,7 @@ def extract_card_transaction(html_str: str):
         out['amount_raw'] = raw_amount.group(1)
         out['amount'] = _parse_amount(raw_amount.group(1))['amount_num']
 
-    recipient = re.search(r"To\s*:\s*(.*?)\s*(?=<br\b[^>]*>|</p>)", html_str,
-                          flags=re.I | re.S)  # 🟨 Non-greedy until the next <br> or </p>.
+    recipient = re.search(r"To\s*:\s*([^<]+?)\s*(?=<)", html_str)  # 🟨 Re.I means case insensitive. but we want it to match To: exactly!
     if recipient:
         out['to'] = _clean_text(recipient.group(1))  # 🟨 Clean spacing; avoids capturing following sentences.
 
@@ -178,15 +205,132 @@ def extract_card_transaction(html_str: str):
 
 class GmailManager:
     def __init__(self):
-        self.gmail = Gmail(creds_file=CREDS_FILE_PATH)
-        # client_secrets_file is used to initialise the api the first time around
-        # once app switched to production, and this code is run, the gmail_token.json file will be automatically generated, and you need
-        # to specify the file path under creds_file= if you don't want to put it at the same folder as the code.
+        # ─────────────────────────────────────────────────────────────────────
+        # [CHANGED] Wrap simplegmail init in a try; keep a google-auth service
+        # handle as None for now. We'll build it lazily if needed.
+        # WHY: if simplegmail hits invalid_grant or proxy issues, we can fall back.
+        # HOW: we set self.gmail if simplegmail is available; else, leave None.
+        # ─────────────────────────────────────────────────────────────────────
+        self.gmail = None
+        if _SIMPLEGMAIL_AVAILABLE and CREDS_FILE_PATH:
+            try:
+                self.gmail = Gmail(creds_file=CREDS_FILE_PATH)
+                # NOTE: simplegmail will attempt refresh during .service access later.
+            except Exception as e:
+                # If simplegmail can't initialize for any reason, we leave it None and
+                # will use the google-auth fallback in get_all_messages().
+                print(f"[gmail] simplegmail init failed, will use google-auth fallback: {e}")
+
+        # [ADDED] Placeholder for google-auth Gmail service. Created on demand.
+        self._ga_service = None
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # [ADDED] Helper: build a google-auth Gmail service using gmail_token.json.
+    # WHY: Uses requests (proxy-friendly on PythonAnywhere free) and avoids
+    #      oauth2client/httplib2. Auto-refreshes access tokens if refresh is valid.
+    # HOW: Requires a gmail_token.json created via InstalledAppFlow with access_type=offline.
+    # ─────────────────────────────────────────────────────────────────────────
+    def _build_google_service(self):
+        if self._ga_service:
+            return self._ga_service
+
+        # Read google-auth style gmail_token.json (SCOPES are baked into the file)
+        creds = Credentials.from_authorized_user_file(GOOGLE_TOKEN_JSON)
+        if not creds or not creds.valid:
+            if creds and creds.expired and creds.refresh_token:
+                # Refresh via requests (respects HTTPS_PROXY on PythonAnywhere)
+                creds.refresh(Request())
+            else:
+                raise RuntimeError(
+                    "No valid Gmail credentials for google-auth fallback. "
+                    "Re-run OAuth locally to create a google-auth gmail_token.json and upload it. "
+                    f"(expected at: {GOOGLE_TOKEN_JSON})"
+                )
+        # cache_discovery=False avoids file writes in restricted environments
+        self._ga_service = build("gmail", "v1", credentials=creds, cache_discovery=False)
+        return self._ga_service
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # [ADDED] Helper: recursively extract the HTML body from Gmail API payloads.
+    # WHY: Your code expects 'message.html' like simplegmail provided.
+    # HOW: We traverse parts to find 'text/html'; if missing, fall back to text/plain.
+    # ─────────────────────────────────────────────────────────────────────────
+    def _extract_html_from_payload(self, payload) -> str:
+        if not payload:
+            return ""
+        mime = (payload.get("mimeType") or "").lower()
+        body = payload.get("body", {}) or {}
+        data = body.get("data")
+        if mime == "text/html" and data:
+            try:
+                return base64.urlsafe_b64decode(data.encode("utf-8")).decode("utf-8", errors="ignore")
+            except Exception:
+                return ""
+        # If multipart, look into parts
+        for part in (payload.get("parts") or []):
+            html_str = self._extract_html_from_payload(part)
+            if html_str:
+                return html_str
+        # Fallback: return text/plain wrapped minimally so downstream parsers still work
+        if mime == "text/plain" and data:
+            try:
+                text = base64.urlsafe_b64decode(data.encode("utf-8")).decode("utf-8", errors="ignore")
+                return f"<pre>{html_escape(text)}</pre>"
+            except Exception:
+                return ""
+        return ""
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # [ADDED] Lightweight message wrapper so callers can keep using 'message.html'
+    # WHY: Your loop expects objects with a .html attribute (from simplegmail).
+    # HOW: We return instances of this class when using google-auth fallback.
+    # ─────────────────────────────────────────────────────────────────────────
+    class _Msg:
+        def __init__(self, html_str: str, id_: str):
+            self.html = html_str
+            self.id = id_
 
     def get_all_messages(self):
-        msgs = self.gmail.get_messages(
-            query=f'newer_than:{START_PERIOD} older_than:{END_PERIOD} from:(paylah.alert@dbs.com OR ibanking.alert@dbs.com) subject:(card transaction alert)')
-        msgs += self.gmail.get_messages(
-            query=f'newer_than:{START_PERIOD} older_than:{END_PERIOD} from:(paylah.alert@dbs.com OR ibanking.alert@dbs.com) subject:(alerts)')
-        # subject: (text) just searches if anywhere in the subject it contains these 2 words
-        return msgs
+        # ----------------------------------------------------------------------------
+        # ORIGINAL: use simplegmail queries. We keep your two queries exactly the same.
+        # ----------------------------------------------------------------------------
+        query1 = f'newer_than:{START_PERIOD} older_than:{END_PERIOD} from:(paylah.alert@dbs.com OR ibanking.alert@dbs.com) subject:(card transaction alert)'
+        query2 = f'newer_than:{START_PERIOD} older_than:{END_PERIOD} from:(paylah.alert@dbs.com OR ibanking.alert@dbs.com) subject:(alerts)'
+
+        # ─────────────────────────────────────────────────────────────────────────
+        # [CHANGED] Try simplegmail first (preserves your original behavior).
+        # WHY: If the refresh token is valid and the env has open egress, this works.
+        #      But if we hit invalid_grant or proxy issues, we fall back cleanly.
+        # HOW: We catch oauth2client's refresh errors and any network OSErrors here.
+        # ─────────────────────────────────────────────────────────────────────────
+        if self.gmail is not None:
+            try:
+                msgs = self.gmail.get_messages(query=query1)
+                msgs += self.gmail.get_messages(query=query2)
+                return msgs  # same objects as before (have .html)
+            except Exception as e:
+                # Common failures:
+                # - oauth2client.client.HttpAccessTokenRefreshError (invalid_grant)
+                # - OSError: [Errno 101] Network is unreachable (PythonAnywhere free)
+                print(f"[gmail] simplegmail path failed, switching to google-auth fallback: {e}")
+
+        # ─────────────────────────────────────────────────────────────────────────
+        # [ADDED] Fallback: use the Gmail REST API via google-auth.
+        # WHY: Works behind PythonAnywhere's proxy and handles token refresh with requests.
+        # HOW: Reuses the *same query strings* you already built.
+        #      We list message IDs, then fetch each message (format='full') and
+        #      extract an HTML body, wrapping into _Msg(html, id).
+        # ─────────────────────────────────────────────────────────────────────────
+        service = self._build_google_service()
+
+        def _fetch_ids(q):
+            resp = service.users().messages().list(userId="me", q=q, maxResults=100).execute()
+            return [m["id"] for m in resp.get("messages", [])]
+
+        ids = _fetch_ids(query1) + _fetch_ids(query2)
+        out = []
+        for message_id in ids:
+            m = service.users().messages().get(userId="me", id=message_id, format="full").execute()
+            html_str = self._extract_html_from_payload(m.get("payload"))
+            out.append(GmailManager._Msg(html_str=html_str, id_=message_id))
+        return out
