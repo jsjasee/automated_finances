@@ -35,6 +35,17 @@ if msgs:
                 # ADD THE DATA TO NOTION
                 notion_bot.add_row(record_name=payment_details['to'], record_date=converted_date, record_amount=payment_details['amount_num'])
                 print('SUCCESS!')
+            elif payment_details['to'] in notion_bot.latest_names_in_record:
+                # in the rare case that payment is made to the same merchant
+                indexes_of_recipient = [i for i, name in enumerate(notion_bot.latest_names_in_record) if name == payment_details['to']]
+                can_create_record = True
+                for i in indexes_of_recipient:
+                    if notion_bot.latest_dates_in_record[i] == converted_date:
+                        can_create_record = False
+                if can_create_record:
+                    notion_bot.add_row(record_name=payment_details['to'], record_date=converted_date,
+                                       record_amount=payment_details['amount_num'])
+                    print('SUCCESS!')
 
         elif income_details["date_time"]:
             # print(convert_date(income_details['date_time']))
@@ -44,6 +55,18 @@ if msgs:
             converted_date = gmail_manager.convert_date(card_transaction_details['date_time'])
             # print(card_transaction_details['to'])
             if converted_date not in notion_bot.latest_dates_in_record or card_transaction_details['amount'] not in latest_amounts_in_record or card_transaction_details['to'] not in notion_bot.latest_names_in_record:
-                pass
                 notion_bot.add_row(record_name=card_transaction_details['to'], record_date=converted_date, record_amount=card_transaction_details['amount'])
+
+            elif card_transaction_details['to'] in notion_bot.latest_names_in_record:
+                # in the rare case that payment is made to the same merchant
+                indexes_of_recipient = [i for i, name in enumerate(notion_bot.latest_names_in_record) if
+                                        name == card_transaction_details['to']]
+                can_create_record = True
+                for i in indexes_of_recipient:
+                    if notion_bot.latest_dates_in_record[i] == converted_date:
+                        can_create_record = False
+                if can_create_record:
+                    notion_bot.add_row(record_name=card_transaction_details['to'], record_date=converted_date,
+                                       record_amount=card_transaction_details['amount'])
+                    print('SUCCESS!')
             telegram_bot.send_message(chat_id=CHAT_ID, text=f"💳️ New expense:\n🗓️DATE: {card_transaction_details['date_time']}\n💵AMOUNT: {card_transaction_details['amount_raw']}\n🧍RECIPIENT: {card_transaction_details['to']}")
