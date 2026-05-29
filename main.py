@@ -3,11 +3,12 @@ import notion_manager
 import os
 from telebot import TeleBot
 from dotenv import load_dotenv
+import time
 
 load_dotenv()
 
-TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-CHAT_ID = os.environ.get("CHAT_ID")
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN") or "No bot token given"
+CHAT_ID = os.environ.get("CHAT_ID") or "No chat token given"
 
 gmail_bot = gmail_manager.GmailManager()
 notion_bot = notion_manager.NotionManager()
@@ -19,6 +20,19 @@ msgs = gmail_bot.get_all_messages()
 
 print("OK. Messages fetched:", len(msgs))
 
+def send_telegram_message(text, retries=3):
+    for attempt in range(1, retries + 1):
+        try:
+            telegram_bot.send_message(chat_id=CHAT_ID, text=text)
+            print("[telegram] Message sent")
+            return True
+        except Exception as e:
+            print(f"[telegram] Attempt {attempt} failed: {e}")
+            if attempt < retries:
+                time.sleep(5)
+    print("[telegram] Failed after retries")
+    return False
+
 if msgs:
     for message in msgs:
         # print(message.html)
@@ -29,7 +43,10 @@ if msgs:
 
         # send the message
         if payment_details["date_time"]:
-            telegram_bot.send_message(chat_id=CHAT_ID, text=f"⬇️ New expense:\n🗓️DATE: {payment_details['date_time']}\n💵AMOUNT: {payment_details['amount']}\n🧍RECIPIENT: {payment_details['to']}")
+            message_to_send = f"⬇️ New expense:\n🗓️DATE: {payment_details['date_time']}\n💵AMOUNT: {payment_details['amount']}\n🧍RECIPIENT: {payment_details['to']}"
+            send_message_status = send_telegram_message(message_to_send)
+            print("Send telegram message status:", send_message_status)
+
             converted_date = gmail_manager.convert_date(payment_details['date_time'])
             if converted_date not in notion_bot.latest_dates_in_record or payment_details['amount_num'] not in latest_amounts_in_record or payment_details['to'] not in notion_bot.latest_names_in_record:
                 # ADD THE DATA TO NOTION
@@ -49,7 +66,9 @@ if msgs:
 
         elif income_details["date_time"]:
             # print(convert_date(income_details['date_time']))
-            telegram_bot.send_message(chat_id=CHAT_ID, text=f"⬆️ New INCOME:\n🗓️DATE: {income_details['date_time']}\n💰AMOUNT: {income_details['amount_raw']}\nPAYEE: {income_details['from']}")
+            message_to_send = f"⬆️ New INCOME:\n🗓️DATE: {income_details['date_time']}\n💰AMOUNT: {income_details['amount_raw']}\nPAYEE: {income_details['from']}"
+            send_message_status = send_telegram_message(message_to_send)
+            print("Send telegram message status:", send_message_status)
 
         elif card_transaction_details["date_time"]:
             converted_date = gmail_manager.convert_date(card_transaction_details['date_time'])
@@ -69,4 +88,7 @@ if msgs:
                     notion_bot.add_row(record_name=card_transaction_details['to'], record_date=converted_date,
                                        record_amount=card_transaction_details['amount'])
                     print('SUCCESS!')
-            telegram_bot.send_message(chat_id=CHAT_ID, text=f"💳️ New expense:\n🗓️DATE: {card_transaction_details['date_time']}\n💵AMOUNT: {card_transaction_details['amount_raw']}\n🧍RECIPIENT: {card_transaction_details['to']}")
+
+            message_to_send = f"💳️ New expense:\n🗓️DATE: {card_transaction_details['date_time']}\n💵AMOUNT: {card_transaction_details['amount_raw']}\n🧍RECIPIENT: {card_transaction_details['to']}"
+            send_message_status = send_telegram_message(message_to_send)
+            print("Send telegram message status:", send_message_status)
