@@ -20,7 +20,7 @@ msgs = gmail_bot.get_all_messages()
 
 print("OK. Messages fetched:", len(msgs))
 
-def send_telegram_message(text, retries=3):
+def send_telegram_message(text, retries=5):
     for attempt in range(1, retries + 1):
         try:
             telegram_bot.send_message(chat_id=CHAT_ID, text=text)
